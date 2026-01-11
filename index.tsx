@@ -30,14 +30,14 @@ const cleanValue = (val: any) => {
 };
 
 const numericSort = (aRoom: string, bRoom: string) => {
-  const a = parseInt(aRoom) || 0;
-  const b = parseInt(bRoom) || 0;
+  const a = parseInt(aRoom.replace(/\D/g, '')) || 0;
+  const b = parseInt(bRoom.replace(/\D/g, '')) || 0;
   if (a !== b) return a - b;
-  return aRoom.localeCompare(bRoom);
+  return aRoom.localeCompare(bRoom, undefined, { numeric: true });
 };
 
 // --- KONFIGURATION ---
-const STORAGE_KEY = 'weekend_app_v25_final';
+const STORAGE_KEY = 'weekend_app_v26_master';
 const WISE_COLORS = ['bg-[#FFB300]', 'bg-[#00BFA5]', 'bg-[#D81B60]', 'bg-[#1E88E5]', 'bg-[#5E35B1]'];
 
 const CLEANING_CONFIG = [
@@ -85,10 +85,11 @@ const App = () => {
   const [showAllStudents, setShowAllStudents] = useState(false);
   const [brandListDay, setBrandListDay] = useState(getActualDayName());
   const [expandedHouses, setExpandedHouses] = useState<Record<string, boolean>>({});
-  const [editingLoc, setEditingLoc] = useState<string | null>(null); // Student ID
+  const [editingLoc, setEditingLoc] = useState<string | null>(null);
   const [manualAdd, setManualAdd] = useState<any | null>(null);
   const [showFaq, setShowFaq] = useState(false);
   const [locSearch, setLocSearch] = useState('');
+  const [customLoc, setCustomLoc] = useState('');
 
   // --- PERSISTENS ---
   useEffect(() => {
@@ -113,7 +114,7 @@ const App = () => {
     }
   }, [students, weekendNum, taskAssignments, cleaningAssignments, lockedSlots]);
 
-  // --- AUTOMATIK (ADSKILT) ---
+  // --- ADSKILTE AUTOMATIK FUNKTIONER ---
   const performAutoTasks = useCallback(() => {
     const newTasks = { ...taskAssignments };
     TASK_CONFIG.forEach(t => { if (!lockedSlots[t.id]) newTasks[t.id] = []; });
@@ -127,7 +128,7 @@ const App = () => {
       assigned.forEach(id => used.add(id));
     });
     setTaskAssignments(newTasks);
-    alert("Tjanser fordelt!");
+    alert("Tjanser er fordelt!");
   }, [students, taskAssignments, lockedSlots]);
 
   const performAutoCleaning = useCallback(() => {
@@ -143,41 +144,36 @@ const App = () => {
       idx += area.count;
     });
     setCleaningAssignments(newClean);
-    alert("Rengøring fordelt!");
+    alert("Rengøring er fordelt!");
   }, [students, cleaningAssignments, lockedSlots]);
 
-  // --- EKSPORT/IMPORT ---
-  // Adding missing downloadData function to fix line 249 error
+  // --- BACKUP ---
   const downloadData = () => {
     const data = JSON.stringify({ students, weekendNum, taskAssignments, cleaningAssignments, lockedSlots });
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `weekend-data-uge-${weekendNum}.json`;
+    a.download = `weekend_backup_uge${weekendNum}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Adding missing handleRestore function to fix line 256 error
   const handleRestore = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const result = ev.target?.result;
-        if (typeof result !== 'string') return;
-        const p = JSON.parse(result);
+        const p = JSON.parse(ev.target?.result as string);
         if (p.students) setStudents(p.students);
         if (p.weekendNum) setWeekendNum(p.weekendNum);
-        if (p.taskAssignments) setTaskAssignments(p.taskAssignments);
-        if (p.cleaningAssignments) setCleaningAssignments(p.cleaningAssignments);
-        if (p.lockedSlots) setLockedSlots(p.lockedSlots);
-        alert("Data genoprettet!");
-      } catch (err) { 
-        alert("Fejl ved indlæsning af backup: " + (err instanceof Error ? err.message : String(err))); 
-      }
+        setTaskAssignments(p.taskAssignments || {});
+        setCleaningAssignments(p.cleaningAssignments || {});
+        setLockedSlots(p.lockedSlots || {});
+        alert("Backup indlæst!");
+        setActiveTab('students');
+      } catch (err) { alert("Fejl ved indlæsning."); }
     };
     reader.readAsText(file);
   };
@@ -189,12 +185,8 @@ const App = () => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        // Fix for unknown type issue: ensuring ev.target.result is typed correctly
         const result = ev.target?.result;
-        if (typeof result !== 'string' && !(result instanceof ArrayBuffer)) {
-          throw new Error("Kunne ikke læse filen");
-        }
-        const wb = XLSX.read(result, { type: result instanceof ArrayBuffer ? 'array' : 'binary' });
+        const wb = XLSX.read(result, { type: 'binary' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
         if (data.length < 2) return;
@@ -226,10 +218,7 @@ const App = () => {
         });
         setStudents(parsed);
         setActiveTab('students');
-      } catch (err) { 
-        // Fixing line 206 error: explicitly stringify error from unknown catch block
-        alert("Excel-fejl: " + (err instanceof Error ? err.message : String(err))); 
-      }
+      } catch (err) { alert("Excel-fejl."); }
     };
     reader.readAsBinaryString(file);
   };
@@ -242,26 +231,29 @@ const App = () => {
     return matchSearch && (showAllStudents || s.isPresent);
   }).sort((a,b) => a.firstName.localeCompare(b.firstName));
 
-  // For sovesteds-modal
+  // --- SOVESTED LOGIK ---
   const studentToEdit = useMemo(() => students.find(s => s.id === editingLoc), [editingLoc, students]);
-  const otherRoomsInHouse = useMemo(() => {
+  const otherRoomsOnGang = useMemo(() => {
     if (!studentToEdit) return [];
     const rooms = Array.from(new Set(students.filter(s => s.house === studentToEdit.house && s.room !== studentToEdit.room).map(s => s.room)));
-    return rooms.sort((a,b) => (parseInt(a)||0) - (parseInt(b)||0));
+    return rooms.sort(numericSort);
   }, [studentToEdit, students]);
 
-  const allOtherRooms = useMemo(() => {
+  const allPossibleRooms = useMemo(() => {
     const map = new Map();
     students.forEach(s => {
       const key = `${s.house} - ${s.room}`;
       if (!map.has(key)) map.set(key, { house: s.house, room: s.room });
     });
-    return Array.from(map.values()).sort((a,b) => a.house.localeCompare(b.house) || (parseInt(a.room)||0) - (parseInt(b.room)||0));
+    return Array.from(map.values()).sort((a,b) => a.house.localeCompare(b.house) || numericSort(a.room, b.room));
   }, [students]);
 
-  const locFilteredRooms = allOtherRooms.filter(r => 
-    `${r.house} ${r.room}`.toLowerCase().includes(locSearch.toLowerCase())
-  );
+  const updateSleepingLoc = (loc: string) => {
+    setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: loc}} : s));
+    setEditingLoc(null);
+    setCustomLoc('');
+    setLocSearch('');
+  };
 
   return (
     <div className={`min-h-screen ${previewType ? 'bg-white text-black' : 'bg-[#0A0E1A] text-white pb-32'}`}>
@@ -274,7 +266,7 @@ const App = () => {
             </div>
             <div className="flex gap-2">
               <button onClick={() => setShowFaq(true)} className="p-2 opacity-30 hover:opacity-100"><HelpCircle/></button>
-              <button onClick={() => { if(confirm("Nulstil alt?")) { localStorage.clear(); location.reload(); }}} className="p-2 text-red-500 opacity-30 hover:opacity-100"><RotateCcw/></button>
+              <button onClick={() => { if(confirm("Nulstil?")) { localStorage.clear(); location.reload(); }}} className="p-2 text-red-500 opacity-30 hover:opacity-100"><RotateCcw/></button>
             </div>
           </header>
 
@@ -284,19 +276,19 @@ const App = () => {
                 <div className="text-center space-y-6">
                   <div className="bg-white/5 p-12 rounded-[3.5rem] border-2 border-dashed border-white/10">
                      <Upload className="mx-auto w-12 h-12 text-[#FFB300] mb-6"/>
-                     <h2 className="text-2xl font-black uppercase mb-6 italic">Hent Elevdata</h2>
+                     <h2 className="text-2xl font-black uppercase mb-6 italic">Indlæs Data</h2>
                      <input type="file" id="up" className="hidden" onChange={handleFileUpload} accept=".xlsx,.xls,.csv"/>
-                     <label htmlFor="up" className="block w-full py-5 bg-[#00BFA5] text-black rounded-2xl font-black uppercase cursor-pointer shadow-lg hover:scale-105 transition-all text-center">Indlæs Excel</label>
+                     <label htmlFor="up" className="block w-full py-5 bg-[#00BFA5] text-black rounded-2xl font-black uppercase cursor-pointer shadow-lg hover:scale-105 transition-all text-center">Vælg Excel-fil</label>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                    <button onClick={downloadData} className="flex flex-col items-center gap-2 p-6 bg-white/5 rounded-3xl border border-white/10 hover:bg-white/10">
                       <Save className="text-[#1E88E5]"/>
-                      <span className="font-black uppercase text-[10px]">Eksport (Backup)</span>
+                      <span className="font-black uppercase text-[10px]">Eksport Backup</span>
                    </button>
                    <label htmlFor="restore-input" className="flex flex-col items-center gap-2 p-6 bg-white/5 rounded-3xl border border-white/10 hover:bg-white/10 cursor-pointer">
                       <RotateCcw className="text-[#D81B60]"/>
-                      <span className="font-black uppercase text-[10px]">Import (Restore)</span>
+                      <span className="font-black uppercase text-[10px]">Import Backup</span>
                       <input type="file" id="restore-input" className="hidden" accept=".json" onChange={handleRestore}/>
                    </label>
                 </div>
@@ -343,7 +335,7 @@ const App = () => {
                     </div>
                  </div>
                  {allHouses.map((house, idx) => {
-                    const houseSts = students.filter(s => s.house === house && s.isPresent).sort((a,b) => numericSort(a.room, b.room));
+                    const houseSts = students.filter(s => s.house === house && s.isPresent).sort((a,b) => numericSort(a.room, b.room) || a.firstName.localeCompare(b.firstName));
                     const isExp = expandedHouses[house];
                     return (
                       <div key={house} className="bg-white/5 rounded-[2.5rem] border border-white/10 overflow-hidden">
@@ -437,7 +429,7 @@ const App = () => {
 
             {activeTab === 'print' && (
               <div className="py-10 space-y-8">
-                 <div className="flex justify-between items-center px-4">
+                <div className="flex justify-between items-center px-4">
                     <h2 className="text-2xl font-black uppercase italic">Print</h2>
                     <div className="flex bg-white/5 p-1 rounded-xl">
                        {['Fredag', 'Lørdag', 'Søndag'].map(d => (
@@ -483,6 +475,7 @@ const App = () => {
               <h2 className="font-black uppercase text-xs italic tracking-widest">Print: {previewType === 'main' ? 'Tjanser' : previewType === 'brand' ? `Brandliste - ${brandListDay}` : 'Søndagsliste'}</h2>
               <button onClick={() => window.print()} className="bg-[#00BFA5] text-black px-8 py-3 rounded-2xl font-black uppercase text-xs flex items-center gap-3 shadow-lg">Print PDF <Printer className="w-4 h-4"/></button>
            </div>
+           
            <div className="max-w-4xl mx-auto pt-24 print:pt-0">
               {previewType === 'brand' && (
                 Object.entries(
@@ -496,10 +489,10 @@ const App = () => {
                 ).sort().map(([house, sts]: [string, any]) => (
                   <div key={house} className="a4-page page-break p-10 border-[10px] border-red-600 h-[297mm] flex flex-col mb-8 bg-white">
                     <div className="flex justify-between items-end border-b-4 border-red-600 pb-2 mb-6">
-                       <h1 className="text-4xl font-black text-red-600 italic uppercase">Brandliste • {brandListDay}</h1>
+                       <h1 className="text-4xl font-black text-red-600 italic uppercase leading-none">Brandliste • {brandListDay}</h1>
                        <div className="text-right"><p className="text-6xl font-black text-red-600 leading-none">{sts.length}</p></div>
                     </div>
-                    <h2 className="text-5xl font-black uppercase mb-6 italic">{house}</h2>
+                    <h2 className="text-5xl font-black uppercase mb-8 leading-none italic">{house}</h2>
                     <div className="grid grid-cols-2 gap-x-12 gap-y-3 flex-1 overflow-hidden">
                        {Object.entries(sts.reduce((acc: any, s: any) => {
                            const loc = String(s.sleepingLocations[brandListDay] || '');
@@ -510,10 +503,10 @@ const App = () => {
                          }, {}))
                        .sort((a, b) => numericSort(a[0], b[0]))
                        .map(([room, roomSts]: [string, any]) => (
-                         <div key={room} className="border-l-2 border-red-600 pl-3 py-0.5 break-inside-avoid">
-                            <p className="text-[9px] font-black text-red-600 uppercase italic">Værelse {room}</p>
+                         <div key={room} className="border-l-2 border-red-600 pl-3 py-1 break-inside-avoid">
+                            <p className="text-[10px] font-black text-red-600 uppercase italic">Værelse {room}</p>
                             {roomSts.sort((a:any, b:any)=>a.firstName.localeCompare(b.firstName)).map((s: any, idx: number) => (
-                              <p key={idx} className="text-[17px] font-bold border-b border-slate-50">{s.firstName} {s.lastName}</p>
+                              <p key={idx} className="text-[17px] font-bold border-b border-slate-50 leading-tight">{s.firstName} {s.lastName}</p>
                             ))}
                          </div>
                        ))}
@@ -525,28 +518,28 @@ const App = () => {
               {previewType === 'main' && (
                 <div className="space-y-4 bg-white">
                   {['Fredag', 'Lørdag', 'Søndag'].map(day => (
-                    <div key={day} className="a4-page page-break p-10 flex flex-col min-h-[297mm]">
-                       <div className="border-b-2 border-black pb-2 mb-6 text-center">
-                         <h1 className="text-3xl font-black italic uppercase">Tjanser - {day} (Uge {weekendNum})</h1>
+                    <div key={day} className="a4-page page-break p-12 flex flex-col min-h-[297mm]">
+                       <div className="border-b-4 border-black pb-2 mb-8 text-center">
+                         <h1 className="text-3xl font-black italic uppercase leading-none">Tjanser - {day} (Uge {weekendNum})</h1>
                        </div>
-                       <div className="grid grid-cols-2 gap-3">
+                       <div className="grid grid-cols-2 gap-4">
                           {TASK_CONFIG.filter(t => t.day === day).map(t => (
-                            <div key={t.id} className="p-3 border border-slate-200 rounded-xl">
-                               <p className="text-[9px] font-black uppercase text-slate-400 mb-0.5">{t.label.split(': ')[1]}</p>
+                            <div key={t.id} className="p-4 border border-slate-200 rounded-2xl">
+                               <p className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">{t.label.split(': ')[1]}</p>
                                <p className="text-[17px] font-bold italic">{(taskAssignments[t.id] || []).map(getName).join(' & ') || '---'}</p>
                             </div>
                           ))}
                        </div>
                     </div>
                   ))}
-                  <div className="a4-page page-break p-10 flex flex-col min-h-[297mm]">
-                    <div className="border-b-2 border-black pb-2 mb-6 text-center">
+                  <div className="a4-page page-break p-12 flex flex-col min-h-[297mm]">
+                    <div className="border-b-4 border-black pb-2 mb-8 text-center">
                       <h1 className="text-3xl font-black italic uppercase">Rengøring (Uge {weekendNum})</h1>
                     </div>
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-4 flex-1 content-start">
+                    <div className="grid grid-cols-2 gap-x-8 gap-y-6 flex-1 content-start">
                        {CLEANING_CONFIG.map(area => (
-                          <div key={area.name} className="border-b border-slate-100 pb-2">
-                             <p className="text-[9px] font-black uppercase text-slate-400 mb-0.5">{area.name}</p>
+                          <div key={area.name} className="border-b border-slate-100 pb-3">
+                             <p className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">{area.name}</p>
                              <p className="text-[16px] font-bold italic">{(cleaningAssignments[area.name] || []).map(getName).join(', ') || '---'}</p>
                           </div>
                        ))}
@@ -556,16 +549,16 @@ const App = () => {
               )}
 
               {previewType === 'sunday' && (
-                <div className="a4-page p-10 bg-white min-h-[297mm]">
-                   <h1 className="text-3xl font-black italic uppercase border-b-2 border-black pb-4 mb-6">Søndagsliste • Uge {weekendNum}</h1>
+                <div className="a4-page p-12 bg-white min-h-[297mm]">
+                   <h1 className="text-3xl font-black italic uppercase border-b-4 border-black pb-4 mb-8">Søndagsliste • Uge {weekendNum}</h1>
                    <div className="grid grid-cols-3 gap-x-6 gap-y-1">
                       {students.sort((a,b) => a.firstName.localeCompare(b.firstName)).map(s => (
-                        <div key={s.id} className="flex justify-between items-center py-1 border-b border-slate-100">
+                        <div key={s.id} className="flex justify-between items-center py-1.5 border-b border-slate-100">
                            <div className="overflow-hidden">
-                              <p className="text-[13px] font-bold leading-none truncate">{s.firstName} {s.lastName}</p>
-                              <p className="text-[8px] uppercase font-black opacity-30 mt-0.5">{s.house} • {s.room}</p>
+                              <p className="text-[14px] font-bold leading-none truncate">{s.firstName} {s.lastName}</p>
+                              <p className="text-[8px] uppercase font-black opacity-30 mt-1">{s.house} • {s.room}</p>
                            </div>
-                           <div className="w-6 h-6 border-2 border-black flex-shrink-0 ml-1"></div>
+                           <div className="w-7 h-7 border-2 border-black flex-shrink-0 ml-1"></div>
                         </div>
                       ))}
                    </div>
@@ -587,11 +580,8 @@ const App = () => {
                 <button onClick={() => setEditingLoc(null)} className="p-3 bg-white/5 rounded-full"><X/></button>
              </div>
              <div className="flex-1 overflow-y-auto space-y-8 pr-2 custom-scroll">
-                {/* Eget værelse */}
-                <button onClick={() => {
-                   setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: `${studentToEdit.house} - ${studentToEdit.room}`}} : s));
-                   setEditingLoc(null);
-                }} className="w-full p-6 bg-[#FFB300]/10 border border-[#FFB300]/20 rounded-2xl flex items-center gap-4 hover:scale-[1.02] transition-all">
+                
+                <button onClick={() => updateSleepingLoc(`${studentToEdit.house} - ${studentToEdit.room}`)} className="w-full p-6 bg-[#FFB300]/10 border border-[#FFB300]/20 rounded-2xl flex items-center gap-4 hover:scale-[1.02] transition-all">
                    <Home className="text-[#FFB300]"/>
                    <div className="text-left">
                       <p className="font-black text-[#FFB300]">Eget Værelse ({studentToEdit.room})</p>
@@ -599,42 +589,30 @@ const App = () => {
                    </div>
                 </button>
 
-                {/* Andre på gangen */}
                 <div>
-                   <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Andre værelser på {studentToEdit.house}</p>
+                   <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Andre på gangen ({studentToEdit.house})</p>
                    <div className="grid grid-cols-4 gap-2">
-                      {otherRoomsInHouse.map(r => (
-                        <button key={r} onClick={() => {
-                           setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: `${studentToEdit.house} - ${r}`}} : s));
-                           setEditingLoc(null);
-                        }} className="p-3 bg-white/5 border border-white/5 rounded-xl font-black text-xs hover:bg-white/10">{r}</button>
+                      {otherRoomsOnGang.map(r => (
+                        <button key={r} onClick={() => updateSleepingLoc(`${studentToEdit.house} - ${r}`)} className="p-3 bg-white/5 border border-white/5 rounded-xl font-black text-xs hover:bg-white/10">{r}</button>
                       ))}
                    </div>
                 </div>
 
-                {/* Fællesområder */}
                 <div>
                    <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Fælles områder</p>
                    <div className="grid grid-cols-2 gap-2">
                       {COMMON_SLEEPING_AREAS.map(area => (
-                        <button key={area} onClick={() => {
-                           setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: area}} : s));
-                           setEditingLoc(null);
-                        }} className="p-4 bg-white/5 border border-white/5 rounded-xl font-black uppercase text-[10px] hover:bg-white/10">{area}</button>
+                        <button key={area} onClick={() => updateSleepingLoc(area)} className="p-4 bg-white/5 border border-white/5 rounded-xl font-black uppercase text-[10px] hover:bg-white/10">{area}</button>
                       ))}
                    </div>
                 </div>
 
-                {/* Søg alle */}
                 <div>
-                   <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Alle værelser på skolen</p>
-                   <input type="text" placeholder="Søg værelse..." value={locSearch} onChange={e => setLocSearch(e.target.value)} className="w-full bg-white/5 p-4 rounded-xl mb-3 outline-none border border-white/10 text-sm"/>
-                   <div className="grid grid-cols-1 gap-2">
-                      {locFilteredRooms.slice(0, 50).map(r => (
-                        <button key={`${r.house}-${r.room}`} onClick={() => {
-                           setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: `${r.house} - ${r.room}`}} : s));
-                           setEditingLoc(null);
-                        }} className="p-4 bg-white/5 border border-white/5 rounded-xl flex justify-between items-center hover:bg-white/10">
+                   <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Søg alle værelser</p>
+                   <input type="text" placeholder="Søg hus eller værelse..." value={locSearch} onChange={e => setLocSearch(e.target.value)} className="w-full bg-white/5 p-4 rounded-xl mb-3 outline-none border border-white/10 text-sm"/>
+                   <div className="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto">
+                      {allPossibleRooms.filter(r => `${r.house} ${r.room}`.toLowerCase().includes(locSearch.toLowerCase())).map(r => (
+                        <button key={`${r.house}-${r.room}`} onClick={() => updateSleepingLoc(`${r.house} - ${r.room}`)} className="p-4 bg-white/5 border border-white/5 rounded-xl flex justify-between items-center hover:bg-white/10">
                            <span className="font-bold text-sm">Værelse {r.room}</span>
                            <span className="text-[10px] uppercase opacity-30 font-black">{r.house}</span>
                         </button>
@@ -642,14 +620,13 @@ const App = () => {
                    </div>
                 </div>
 
-                {/* Andet */}
-                <button onClick={() => {
-                   const res = prompt("Indtast lokation (f.eks. Medierummet):");
-                   if (res) {
-                      setStudents(p => p.map(s => s.id === editingLoc ? {...s, sleepingLocations: {...s.sleepingLocations, [brandListDay]: res}} : s));
-                      setEditingLoc(null);
-                   }
-                }} className="w-full p-4 border border-dashed border-white/20 rounded-xl font-black uppercase text-[10px] opacity-50 hover:opacity-100 mb-10">Andet (manuelt)</button>
+                <div className="pb-10">
+                   <p className="text-[10px] font-black uppercase opacity-30 mb-3 tracking-widest">Manuel indtastning</p>
+                   <div className="flex gap-2">
+                      <input type="text" placeholder="F.eks. Medierummet..." value={customLoc} onChange={e => setCustomLoc(e.target.value)} className="flex-1 bg-white/5 p-4 rounded-xl outline-none border border-white/10 text-sm"/>
+                      <button onClick={() => customLoc && updateSleepingLoc(customLoc)} className="px-6 bg-[#00BFA5] text-black rounded-xl font-black uppercase text-[10px]">Tilføj</button>
+                   </div>
+                </div>
              </div>
           </div>
         </div>
@@ -681,15 +658,15 @@ const App = () => {
       {showFaq && (
         <div className="fixed inset-0 bg-black/98 z-[2000] p-6 flex items-center justify-center backdrop-blur-xl">
            <div className="bg-[#151926] w-full max-md rounded-[3rem] p-10 border border-white/10 space-y-8">
-              <h2 className="text-3xl font-black uppercase text-[#FFB300] italic text-center">Brugervejledning</h2>
+              <h2 className="text-3xl font-black uppercase text-[#FFB300] italic text-center leading-tight">Vejledning</h2>
               <div className="space-y-4 text-sm opacity-80 leading-relaxed custom-scroll max-h-[60vh] pr-2">
-                 <p><b>1. Import:</b> Indlæs en Excel-fil med kolonner for Navn, Værelse, Hus og Weekend-status.</p>
-                 <p><b>2. Elever:</b> Tryk på et navn for at markere om de er her eller ej. Brug "Køkken?" knappen til at friholde elever fra automatiske tjanser.</p>
-                 <p><b>3. Runder:</b> Hold styr på hvor eleverne sover. Brug Map-ikonet for at flytte en elev til et andet værelse, shelter eller fællesområde.</p>
-                 <p><b>4. Tjanser & Rengøring:</b> Brug "Fordel Automatisk" i de respektive faner. Du kan låse en tjans med hængelåsen, så eleven bliver stående ved næste fordeling.</p>
-                 <p><b>5. Print:</b> Find alle færdige lister under Print-ikonet. De er optimeret til A4 med små skrifttyper for at spare plads.</p>
+                 <p><b>1. Elevliste:</b> Markér hvem der er på skolen. Brug "Køkken?" til elever, der har fast køkkenvagt - de bliver så aldrig valgt til automatiske tjanser.</p>
+                 <p><b>2. Runder:</b> Her styrer du sovepladser. Tryk på Map-ikonet for at flytte en elev. De bliver stående det nye sted på brandlisten.</p>
+                 <p><b>3. Tjanser & Rengøring:</b> Brug knapperne til automatisk fordeling. Du kan låse en elev til en tjans med hængelåsen, hvis de absolut skal have den.</p>
+                 <p><b>4. Print:</b> Alle lister findes i print-menuen. De er sat op til at spare papir og plads (A4).</p>
+                 <p><b>5. Backup:</b> Husk at bruge "Eksport" i import-menuen, hvis du vil gemme din weekendplan til senere brug eller en kollega.</p>
               </div>
-              <button onClick={() => setShowFaq(false)} className="w-full py-5 bg-white text-black rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl">OK</button>
+              <button onClick={() => setShowFaq(false)} className="w-full py-5 bg-white text-black rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl">Forstået</button>
            </div>
         </div>
       )}
